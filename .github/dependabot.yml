@@ -1,0 +1,12 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+
+  # cloudflared itself is deliberately not listed here: upstream-update.yml owns
+  # that pin and puts every bump through the smoke test first. Dependabot would
+  # raise the same bumps without that gate.

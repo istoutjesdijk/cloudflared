@@ -1,0 +1,57 @@
+# Cloudflare Tunnel connector, deployed by Coolify (Docker Compose build pack).
+#
+# One container, one Coolify app, one tunnel. Point as many Coolify apps at this
+# file as you have hosts to expose: they share the compose and differ only in
+# the CLOUDFLARE_TUNNEL_TOKEN you give each one. Ingress rules live in the
+# Cloudflare dashboard, not here.
+#
+# Host networking is required, not a shortcut. Tunnel ingress rules normally
+# point at 127.0.0.1 on the machine running the connector -- the reverse proxy
+# on :80, a service on some other port. From a bridge network those addresses
+# resolve to the container itself and every route returns 502. For the same
+# reason "Connect To Predefined Network" stays off on these apps: with
+# network_mode there is no network to join.
+#
+# The app gets no domain in Coolify. It terminates nothing and serves nothing;
+# traffic arrives over the tunnel and leaves again on localhost. Coolify skips
+# Traefik label injection entirely once network_mode is set, so a domain here
+# would be ignored anyway.
+#
+# The image is distroless: no shell, no curl, no wget. That rules out probing
+# the metrics endpoint from inside the container, so the health check is the one
+# thing the image can run on its own. It proves the binary is intact and
+# executable, which is what catches a bad upstream build; whether the tunnel is
+# actually carrying traffic is visible in the container logs and in Cloudflare
+# Zero Trust.
+#
+# The metrics listener is deliberately left unset. Pinning it to one port looks
+# tidier but breaks as soon as two connectors share a host, which is exactly
+# what happens while migrating from an existing connector to this one:
+# cloudflared defaults to 127.0.0.1:20241 and walks up the range when that is
+# taken, and an explicit port skips that search and dies with "address already
+# in use". Coolify passes every variable on the app to the container through
+# env_file, so setting TUNNEL_METRICS there still works if a fixed port is
+# wanted.
+#
+# CLOUDFLARED_TAG is owned by .github/workflows/upstream-update.yml. Setting it
+# as an environment variable on a single Coolify app overrides the pin for that
+# app only, which is the quickest way to hold or roll back one host without
+# touching git.
+
+services:
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared}:${CLOUDFLARED_TAG:-2026.9.0}
+    restart: unless-stopped
+    network_mode: host
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?tunnel token for this connector is required}
+      # auto lets cloudflared choose quic and fall back on its own. Set http2
+      # on a host where quic is blocked or throttled.
+      TUNNEL_TRANSPORT_PROTOCOL: ${TUNNEL_TRANSPORT_PROTOCOL:-auto}
+    healthcheck:
+      test: [CMD, cloudflared, --version]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s

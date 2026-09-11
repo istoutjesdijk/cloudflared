@@ -1,0 +1,92 @@
+name: upstream-update
+
+# Checks daily for a new cloudflared release, proves it works, and only then
+# lets it through to production. The merge into main is what deploys: Coolify's
+# GitHub App picks up the push and redeploys every app following this
+# repository.
+#
+# The smoke test runs here rather than on the pull request on purpose. A pull
+# request opened by GITHUB_TOKEN does not trigger workflows, so validate.yml
+# would never run on it and an auto-merge waiting for that check would hang
+# forever. Running the same script in this job keeps the gate real; the pull
+# request is the audit trail.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-update
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve latest cloudflared release
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # /releases/latest skips drafts and pre-releases.
+          tag="$(gh api repos/cloudflare/cloudflared/releases/latest --jq .tag_name)"
+          # cloudflared uses calendar versions (2026.9.0). Anything that does
+          # not look like one is upstream doing something unusual, and this is
+          # not the place to find out what.
+          if ! printf '%s' "$tag" | grep -Eq '^20[0-9]{2}\.[0-9]+\.[0-9]+$'; then
+            echo "::error::unexpected release tag '${tag}'"; exit 1
+          fi
+          current="$(cat .upstream-ref)"
+          echo "current=${current}  latest=${tag}"
+          if [ "$current" = "$tag" ]; then
+            echo "nothing to do"
+          else
+            echo "version=${tag}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply the bump
+        if: steps.rel.outputs.version != ''
+        env:
+          NEW: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          sed -E -i "s#(CLOUDFLARED_TAG:-)20[0-9]{2}\.[0-9]+\.[0-9]+#\1${NEW}#" compose.yml
+          sed -E -i "s#(CLOUDFLARED_TAG=)20[0-9]{2}\.[0-9]+\.[0-9]+#\1${NEW}#" .env.example
+          printf '%s\n' "$NEW" > .upstream-ref
+          # Fail loudly if a substitution missed, rather than opening a pull
+          # request that leaves production on the old tag.
+          grep -qF "CLOUDFLARED_TAG:-${NEW}" compose.yml
+          git diff --stat
+
+      - name: Prove the new version works
+        if: steps.rel.outputs.version != ''
+        run: ./ci/smoke.sh "${{ steps.rel.outputs.version }}"
+
+      - name: Open and merge the pull request
+        if: steps.rel.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          branch="bump/cloudflared-${NEW}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add -A
+          git commit -m "Update cloudflared to ${NEW}"
+          git push -u origin "$branch"
+          gh pr create \
+            --title "Update cloudflared to ${NEW}" \
+            --body "Smoke test passed on ${NEW}: the image pulls and reports its own version, the compose invariants hold, a quick tunnel served real traffic end to end, the connector registered with the edge, and the health check runs inside the container. Merging redeploys every Coolify app that follows this repository." \
+            --base main --head "$branch"
+          gh pr merge "$branch" --squash --delete-branch

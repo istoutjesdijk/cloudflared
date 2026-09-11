@@ -1,0 +1,27 @@
+name: validate
+
+# Same gate as upstream-update.yml, for changes made by hand: any edit to
+# compose.yml or the smoke test has to survive a real tunnel before it can end
+# up in front of a live connector.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - run: ./ci/smoke.sh
